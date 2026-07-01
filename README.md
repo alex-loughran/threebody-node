@@ -14,6 +14,98 @@ This is intentionally a **separate repo** from the classical-ML surrogate work
 (`threebody-ml`) and the physics engine (`PythonProject1`), matching the existing
 separation: physics engine = stable library, classical ML = its own repo, DL = here.
 
+## Theory
+
+The guiding principle of this repo: **don't penalise physics violations — architect
+them out.** A soft conservation loss buys you "approximately, after training"; the
+right structure gives you "exactly, at initialisation."
+
+### Why a plain Neural ODE drifts
+
+A plain Neural ODE parameterises the vector field directly, `dz/dt = f_θ(z)` with
+`z = (q, p)`. Nothing constrains `f_θ`: a generic learned field has the wrong
+divergence/curl and acts as a net energy source or sink. Per-step errors compound,
+the trajectory leaves the data manifold, and the MLP extrapolates into a blow-up
+(here: `ΔE/|E0|` grows to ~1e13 over 5 orbits). The model isn't badly *trained* —
+it's badly *constrained*.
+
+### Hamiltonian structure
+
+Hamiltonian mechanics gives dynamics a rigid geometric form. For a Hamiltonian
+`H(q, p)`:
+
+```
+dq/dt =  ∂H/∂p
+dp/dt = -∂H/∂q          ⇔   dz/dt = J ∇H(z),   J = [ 0  I; -I  0 ]
+```
+
+`J` (the symplectic matrix) is antisymmetric, and that alone forces energy
+conservation along the flow:
+
+```
+dH/dt = ∇H · dz/dt = ∇Hᵀ J ∇H = 0        (since xᵀ J x = 0 for antisymmetric J)
+```
+
+A **Hamiltonian Neural ODE** learns a *scalar* `H_θ(q, p)` (an MLP) and constructs
+the field from its symplectic gradient, `f_θ = J ∇H_θ` (gradient by autodiff). The
+dynamics are then Hamiltonian *by construction*: the same one-liner shows `H_θ` is
+conserved along the model's own flow. Energy conservation is removed as a *degree of
+freedom*, not added as a penalty — this is what "structural rather than fitted"
+means, and why energy drift stays bounded and flat across horizons (~3%) where the
+plain NODE explodes, on identical data.
+
+Training here is trajectory-matching: integrate `f_θ` with a differentiable solver
+and match the rollout, backpropagating through the solve. Note the nested
+differentiation — `f_θ` already contains `∇H_θ`, so training needs the gradient *of*
+that gradient, composed through the integrator (a natural fit for JAX's `grad`).
+
+### Separability → symplectic integration
+
+Most physical Hamiltonians are **separable**, `H(q, p) = T(p) + V(q)`
+(`SeparableHamiltonianNODE` learns the two heads). Separability is exactly the
+condition that permits an *explicit* symplectic integrator — leapfrog /
+Störmer–Verlet:
+
+```
+p_½ = p₀ − (h/2) ∂V/∂q(q₀)
+q₁  = q₀ +   h   ∂T/∂p(p_½)
+p₁  = p_½ − (h/2) ∂V/∂q(q₁)
+```
+
+(Explicit only because `∂H/∂q` depends on `q` alone and `∂H/∂p` on `p` alone; a
+non-separable `H` would need an implicit solve.) By backward error analysis a
+symplectic integrator conserves a **modified ("shadow") Hamiltonian**
+`H̃ = H + O(h²)` *exactly, for all time* — so its energy error oscillates within a
+bounded band with **no secular drift**, even at coarse steps. A non-symplectic
+method like RK4 has better *local* accuracy but no conserved shadow, so its energy
+drifts secularly over long horizons (here: leapfrog ~7% vs RK4 ~65% over 80 orbits
+at `h=0.4`).
+
+The key nuance: symplectic integration is **not** "more accurate per step" — at
+small `h`, RK4 wins. Leapfrog wins at *coarse* `h` / *long* horizons by trading
+pointwise accuracy for a preserved qualitative invariant. That trade — bounded
+energy at ~3–4× larger steps — is the basis of the milestone-4 fast-surrogate thesis.
+
+### Honest caveats
+
+- **Conserving the *wrong* invariant doesn't help.** `H_θ` is conserved along the
+  model flow, but need not equal the true energy — it's whatever scalar the network
+  settled on. A poorly-estimated `H_θ` gives beautifully conserved but *incorrect*
+  dynamics.
+- **There is a model-error floor.** The learned `H_θ` carries a few-percent error;
+  the symplectic integrator never adds error *above* that floor, so the learned
+  energy surface — not the integrator — is the bottleneck.
+- **Canonical coordinates are assumed.** The `J ∇H` form presumes genuine `(q, p)`
+  canonical data. Dissipative or driven systems break the pure-Hamiltonian
+  assumption and need extensions (e.g. a learned dissipation / port-Hamiltonian term).
+
+### Lineage
+
+Hamiltonian Neural Networks (Greydanus et al., 2019); Symplectic ODE-Net / SymODEN
+(Zhong et al., 2020, integrator-in-the-loop); Lagrangian Neural Networks (Cranmer
+et al., 2020, learn `L(q, q̇)` — no momenta needed); SympNets (Jin et al., 2020,
+symplectic-by-construction maps).
+
 ## Milestones
 
 - [x] **1 — baseline.** Vanilla Neural ODE on the (non-chaotic) two-body problem;
