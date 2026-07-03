@@ -79,6 +79,22 @@ def hamiltonian(y: jnp.ndarray) -> jnp.ndarray:
     return T + V_bond + V_nb
 
 
+def linear_momentum(y: jnp.ndarray) -> jnp.ndarray:
+    """P = sum_i p_i  (3-vector). Conserved iff H is TRANSLATION invariant --
+    which a distance-only potential is (internal pairwise forces cancel by
+    Newton's third law), so the equivariant model conserves it structurally."""
+    _, p = _split(y)
+    return jnp.sum(p, axis=0)
+
+
+def angular_momentum(y: jnp.ndarray) -> jnp.ndarray:
+    """L = sum_i q_i x p_i  (3-vector). Conserved iff H is ROTATION invariant --
+    the SO(3) half of the SE(3) symmetry. This is the rotational analogue of the
+    machine-precision linear-momentum result on the 3-body figure-eight."""
+    q, p = _split(y)
+    return jnp.sum(jnp.cross(q, p), axis=0)
+
+
 def _symplectic_grad(y):
     """J . grad H : dq/dt = dH/dp, dp/dt = -dH/dq (flattened)."""
     g = jax.grad(hamiltonian)(y)
