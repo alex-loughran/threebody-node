@@ -83,6 +83,25 @@ def reference_trajectory(vx, vy, ts, sigma=0.0, seed=0):
     return jnp.asarray(sol.sol(ts).T)
 
 
+def perturbed_ics(vx, vy, n, sigma, seed):
+    """A batch of `n` initial conditions: the base symmetric orbit plus n-1
+    small COM-frame perturbations. Returns (n, 12)."""
+    tb = _import_engine()
+    base = tb.build_state_symmetric(vx, vy)
+    rng = np.random.default_rng(seed)
+    out = [base] + [_recenter(base + sigma * rng.standard_normal(12)) for _ in range(n - 1)]
+    return jnp.asarray(np.stack(out))
+
+
+def integrate_state(state0, ts):
+    """Engine DOP853 ground truth from a raw state, sampled on `ts` -> (len(ts), 12)."""
+    tb = _import_engine()
+    ts = np.asarray(ts)
+    sol = tb.integrate_orbit(np.asarray(state0), float(ts[-1]) + 1e-9,
+                             max_step=float(ts[1] - ts[0]))
+    return jnp.asarray(sol.sol(ts).T)
+
+
 def stable_symmetric_sources(n_max=3):
     """A few stable, symmetric (L=0) orbits from the catalogue: (vx, vy, T, name).
     Stable + symmetric -> clean, non-ejecting trajectories: the right first

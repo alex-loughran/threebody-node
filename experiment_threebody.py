@@ -45,7 +45,11 @@ P = jax.vmap(tb.linear_momentum)
 
 
 def train(model, y0s, targets, ts_win, *, iters, batch, lr, substeps, seed):
-    opt = optax.adam(lr)
+    # Gradient clipping + cosine decay: the 1/d potential feature makes the loss
+    # landscape stiff near close approaches, so raw Adam oscillates. Clipping the
+    # global grad norm tames the occasional exploding batch.
+    sched = optax.cosine_decay_schedule(lr, iters, alpha=0.05)
+    opt = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(sched))
     opt_state = opt.init(eqx.filter(model, eqx.is_inexact_array))
 
     @eqx.filter_value_and_grad
@@ -76,30 +80,46 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--width", type=int, default=64)
     ap.add_argument("--window", type=int, default=6)
-    ap.add_argument("--train-substeps", type=int, default=2)
+    ap.add_argument("--train-substeps", type=int, default=4)
     args = ap.parse_args()
 
     key = jax.random.PRNGKey(0)
 
     print("generating 3-body trajectories from the physics engine ...")
-    trajs, dt = tb.generate(seed=0, n_perturb=8, sigma=0.02, periods=2.0,
+    trajs, dt = tb.generate(seed=0, n_perturb=10, sigma=0.02, periods=2.0,
                             pts_per_period=100, n_sources=3)
     print(f"  {trajs.shape[0]} trajectories x {trajs.shape[1]} pts, dt={dt:.4f}")
     y0s, targets = make_windows(trajs, W=args.window)
     ts_win = jnp.arange(args.window) * dt
     print(f"  {y0s.shape[0]} training windows")
 
-    print(f"training separable Hamiltonian NODE (dim=6, width={args.width}) ...")
-    model = train(SeparableHamiltonianNODE(key, dim=6, width=args.width, depth=3),
+    print(f"training pairwise Hamiltonian NODE (N=3, width={args.width}) ...")
+    model = train(PairwiseHamiltonianNODE(key, n_bodies=3, width=args.width, depth=2),
                   y0s, targets, ts_win, iters=args.iters, batch=args.batch,
                   lr=args.lr, substeps=args.train_substeps, seed=7)
+    # persist the trained model so the milestone-4 experiments (adaptive
+    # integration, surrogate cost curves) can reuse it without retraining.
+    eqx.tree_serialise_leaves(f"{RESULTS}/threebody_model.eqx", model)
+    print(f"  saved trained model -> {RESULTS}/threebody_model.eqx (width={args.width})")
+
+    # ---- in-distribution sanity check: roll out a TRAINING trajectory --------
+    # Same IC the model trained on, over the training horizon. Separates "can it
+    # track dynamics it has seen?" from "does it generalise + stay stable long?".
+    id_true = trajs[0]
+    id_ts = jnp.arange(id_true.shape[0]) * dt
+    id_pred = leapfrog_rollout(model, id_true[0], id_ts, n_substeps=4)
+    id_E0 = float(tb.energy(id_true[0]))
+    id_edrift = float(jnp.max(jnp.abs(E(id_pred) - id_E0))) / abs(id_E0)
+    id_rmse = float(jnp.sqrt(jnp.mean((id_pred - id_true) ** 2)))
+    print("\n=== in-distribution (a training trajectory, ~2 periods) ===")
+    print(f"  state RMSE {id_rmse:.3e}   energy drift ΔE/|E0| {id_edrift:.3e}")
 
     # ---- held-out orbit: a fresh perturbation of the figure-eight ------------
     src = tb.stable_symmetric_sources(1)[0]
     vx, vy, T = src[0], src[1], src[2]
     n_eval = int(6 * 100)                 # ~6 periods
     ts_eval = jnp.arange(n_eval) * dt
-    true = tb.reference_trajectory(vx, vy, ts_eval, sigma=0.02, seed=999)
+    true = tb.reference_trajectory(vx, vy, ts_eval, sigma=0.015, seed=999)
     y0 = true[0]
     E0 = float(tb.energy(y0))
 
@@ -116,10 +136,16 @@ def main():
     print("\n=== held-out figure-eight perturbation ===")
     print(f"  E0 = {E0:.4f}   period T = {T:.3f}   horizon = {float(ts_eval[-1])/T:.1f} orbits")
     print(f"  short-horizon (half-period) state RMSE : {rmse_short:.3e}")
-    print(f"  leapfrog  energy drift ΔE/|E0|         : {drift(lf, E, E0)/abs(E0):.3e}")
-    print(f"  rk4       energy drift ΔE/|E0|         : {drift(rk, E, E0)/abs(E0):.3e}")
-    print(f"  leapfrog  |ΔL|                         : {drift(lf, L, 0.0):.3e}")
-    print(f"  leapfrog  |ΔP| (max component)         : "
+    # energy drift at growing horizons -> shows where (if) the rollout leaves the manifold
+    E_lf = E(lf)
+    print("  leapfrog energy drift ΔE/|E0| by horizon:")
+    for n_orb in (1, 2, 3, 6):
+        m = np.asarray(ts_eval) <= n_orb * T
+        frac = float(jnp.max(jnp.abs(E_lf[m] - E0))) / abs(E0)
+        print(f"      @{n_orb} orbit(s): {frac:.3e}")
+    print(f"  rk4  energy drift ΔE/|E0| (full)       : {drift(rk, E, E0)/abs(E0):.3e}")
+    print(f"  leapfrog |ΔL| (full)                   : {drift(lf, L, 0.0):.3e}")
+    print(f"  leapfrog |ΔP| max component (full)     : "
           f"{float(jnp.max(jnp.abs(P(lf) - P(true)[0]))):.3e}")
 
     # ---- plots ---------------------------------------------------------------

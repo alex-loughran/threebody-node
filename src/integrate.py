@@ -97,3 +97,43 @@ def rk4_rollout(model, y0, ts, n_substeps: int = 1):
 
 def batch_leapfrog(model, y0s, ts, n_substeps: int = 1):
     return jax.vmap(lambda y0: leapfrog_rollout(model, y0, ts, n_substeps))(y0s)
+
+
+def logh_leapfrog_rollout(model, y0, n_steps: int, ds: float, E=None, eps: float = 1e-12):
+    """Time-transformed ("logarithmic Hamiltonian") leapfrog for a separable model
+    with an ATTRACTIVE (negative) potential -- Preto & Tremaine 1999 / Mikkola &
+    Tanikawa 1999.
+
+    Integrates the extended, still-separable Hamiltonian
+        Λ(q, p) = ln(T(p) - E) - ln(-U(q))
+    with an explicit leapfrog in a fictitious time s. The real time obeys
+    dt/ds = 1/(T(p) - E) = 1/(-U(q)) on shell, so steps auto-shrink at close
+    approaches (-U large) and stretch at apoapsis -- adaptive in real time while
+    staying symplectic. Fixed step `ds`, `n_steps` steps.
+
+    `model` must expose kinetic(p), potential(q), dT_dp(p). E (a conserved
+    constant of the scheme) defaults to the model's own H(y0). Returns
+    (ys, ts_real): states of shape (n_steps+1, 2d) and their NON-uniform real times.
+    """
+    d = y0.shape[-1] // 2
+    q0, p0 = y0[:d], y0[d:]
+    if E is None:
+        E = model.kinetic(p0) + model.potential(q0)
+
+    def B(q):                                   # q-only half of Λ
+        return -jnp.log(jnp.maximum(-model.potential(q), eps))
+    gradB = jax.grad(B)
+
+    def step(carry, _):
+        q, p, t = carry
+        p = p - 0.5 * ds * gradB(q)             # half "kick"
+        denom = jnp.maximum(model.kinetic(p) - E, eps)   # = -U on shell > 0
+        q = q + ds * model.dT_dp(p) / denom     # "drift": advances q ...
+        t = t + ds / denom                      # ... and real time
+        p = p - 0.5 * ds * gradB(q)             # half "kick"
+        return (q, p, t), jnp.concatenate([q, p, jnp.array([t])])
+
+    _, out = jax.lax.scan(step, (q0, p0, 0.0), None, length=n_steps)
+    ys = jnp.concatenate([y0[None], out[:, : 2 * d]], axis=0)
+    ts = jnp.concatenate([jnp.zeros(1), out[:, -1]])
+    return ys, ts
