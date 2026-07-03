@@ -169,18 +169,61 @@ blow-up. The Hamiltonian NODE cannot inject net energy into its own `H_θ`, so i
 energy drift stays **bounded and flat across horizons** — the signature of
 structure preservation. See `results/energy_drift.png`.
 
+## Offshoot — SE(3)-equivariant Hamiltonian NODEs for proteins
+
+The same "architect the physics in, don't fit it" principle carries from gravity
+to molecules. A coarse-grained peptide is a chain of `N` beads in 3-D under a
+*separable* Hamiltonian — harmonic backbone bonds plus a softened Lennard-Jones
+non-bonded term (excluded volume + weak attraction, the frustration that folds a
+chain). Two structures stack:
+
+- **Hamiltonian** → energy conservation, lifted to 3-D / N-body.
+- **SE(3)-equivariance** — the protein-specific bias. Build the scalar `H_θ` from
+  *invariant features only* (pairwise distances `|qᵢ−qⱼ|`, per-bead speeds
+  `|pᵢ|²`) and `J ∇H_θ` is automatically an *equivariant* force field — exact to
+  machine precision at initialisation, with no E(3)-GNN machinery.
+
+A 3-way A/B (`PlainNODE3D` < `HamiltonianNODE3D` < `EquivariantHamiltonianNODE`)
+separates the biases: Hamiltonian structure bounds energy drift; equivariance
+gives *identical* predictions on globally-rotated ICs (equiv-error ~1e-9) where
+the others degrade — while fitting ~8× better with ¼ the parameters
+(`results/protein.png`). Four properties then fall out of the one construction:
+
+- **Size generalisation.** `f_kin` is per-bead and `g_pot` per-pair, so the
+  weights carry *no bead count* — the same model runs at any `N` (the fixed-dim
+  baselines cannot even be called). Trained on 5-bead chains it transfers
+  zero-shot to N=4…10; **mixed-N training (4–7) ~halves prediction error and
+  flattens the transfer curve**, incl. extrapolation to N=8/10. Honest boundary:
+  this fixes *accuracy* (data coverage), **not** *conservation*
+  (`results/protein_scale.png`).
+- **Symplectic integration.** Being separable, the model drops straight into
+  leapfrog — learned energy bounded (~1e-3) where RK4 drifts secularly, same
+  crossover story as the 2-body case (`results/protein_symplectic.png`).
+- **Noether momenta.** The SE(3)-invariant `H_θ` conserves linear momentum to
+  **machine precision** (1e-14; structural — distance-only forces sum to zero)
+  and angular momentum to solver tolerance (1e-9), where a raw-coordinate
+  Hamiltonian — energy-conserving but not symmetric — violates both by order 1.
+  The rotational analogue of the 3-body linear-momentum result
+  (`results/protein_noether.png`).
+
 ## Layout
 
 ```
 src/physics.py            true Kepler (2-body) dynamics, conserved quantities, data gen
 src/threebody.py          bridge to the physics engine: pull real orbits, 3-body conserved qty
+src/protein.py            coarse-grained peptide: N-agnostic ground truth, momenta, SE(3) helpers
 src/models.py             PlainNODE, HamiltonianNODE, SeparableHamiltonianNODE (any dim)
+src/protein_models.py     PlainNODE3D < HamiltonianNODE3D < EquivariantHamiltonianNODE
 src/integrate.py          diffrax rollout + fixed-step leapfrog / RK4 + logH (time-transformed) leapfrog
 experiment.py             M1-2: plain vs Hamiltonian NODE, energy drift (2-body)
 experiment_symplectic.py  M3: separable model + leapfrog vs RK4 (secular drift, step-size sweep)
 experiment_threebody.py   M3: symplectic Hamiltonian NODE on real 3-body engine data
 experiment_adaptive.py    M4A: time-transformed (logH) leapfrog vs fixed-step, close approaches
 experiment_surrogate.py   M4B: batched surrogate vs DOP853 — speedup + return-proximity triage
+experiment_protein.py            offshoot: 3-way A/B (energy drift + rotation generalization)
+experiment_protein_scale.py      offshoot: size generalization + mixed-N fix
+experiment_protein_symplectic.py offshoot: leapfrog vs RK4 on the learned peptide H
+experiment_protein_noether.py    offshoot: SE(3) symmetry -> conserved linear & angular momentum
 ```
 
 The three-body data bridge imports the engine from `~/PycharmProjects/PythonProject1`
