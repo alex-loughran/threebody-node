@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 import optax
 
 from src import protein as P
-from src.integrate import rollout
+from src.integrate import rollout, rk4_rollout
 from src.protein_models import (
     PlainNODE3D, HamiltonianNODE3D, EquivariantHamiltonianNODE,
 )
@@ -37,7 +37,7 @@ DT = 0.05
 WINDOW = 10          # training rollout horizon (steps)
 N_TRAIN_TRAJ = 16
 T_TRAIN = 6.0
-N_STEPS = 1500
+N_STEPS = 900
 BATCH = 64
 LR = 2e-3
 
@@ -45,30 +45,33 @@ LR = 2e-3
 # --------------------------------------------------------------------------- #
 # Data: reference trajectories -> flat bank of short (y0, target) windows.
 # --------------------------------------------------------------------------- #
-def build_windows(key):
+def build_windows(key, n_beads: int = P.N_BEADS):
     n_pts = int(T_TRAIN / DT) + 1
-    trajs, _ = P.make_dataset(key, N_TRAIN_TRAJ, T_TRAIN, n_pts)   # (M, n_pts, 6N)
+    trajs, _ = P.make_dataset(key, N_TRAIN_TRAJ, T_TRAIN, n_pts, n_beads)  # (M, n_pts, 6N)
+    state_dim = trajs.shape[-1]
     ts_win = jnp.arange(WINDOW + 1) * DT
     starts = jnp.arange(n_pts - WINDOW)
     # gather every window from every trajectory
     def windows_of(traj):
         return jax.vmap(lambda s: jax.lax.dynamic_slice_in_dim(traj, s, WINDOW + 1))(starts)
     wins = jax.vmap(windows_of)(trajs)                            # (M, n_start, W+1, 6N)
-    wins = wins.reshape(-1, WINDOW + 1, P.STATE_DIM)
+    wins = wins.reshape(-1, WINDOW + 1, state_dim)
     return wins[:, 0], wins, ts_win                              # y0, target-seq, local ts
 
 
 # --------------------------------------------------------------------------- #
 # Training (generic over model).
 # --------------------------------------------------------------------------- #
-def train(model, y0s, targets, ts_win, key, tag):
-    opt = optax.adam(optax.exponential_decay(LR, N_STEPS, 0.1, end_value=LR * 0.05))
+def train(model, y0s, targets, ts_win, key, tag, n_steps: int = N_STEPS):
+    opt = optax.adam(optax.exponential_decay(LR, n_steps, 0.1, end_value=LR * 0.05))
     opt_state = opt.init(eqx.filter(model, eqx.is_array))
     n = y0s.shape[0]
 
     @eqx.filter_value_and_grad
     def loss_fn(m, yb, tb):
-        pred = jax.vmap(lambda y0: rollout(m, y0, ts_win, max_steps=256))(yb)
+        # fixed-step RK4 (lax.scan) -- ~10x less trace overhead than diffrax in
+        # the hot training loop, and fully differentiable for BPTT.
+        pred = jax.vmap(lambda y0: rk4_rollout(m, y0, ts_win))(yb)
         return jnp.mean((pred - tb) ** 2)
 
     @eqx.filter_jit
@@ -79,11 +82,11 @@ def train(model, y0s, targets, ts_win, key, tag):
         return m, opt_state, loss
 
     t0 = time.time()
-    for i in range(N_STEPS):
+    for i in range(n_steps):
         key, sk = jax.random.split(key)
         idx = jax.random.randint(sk, (BATCH,), 0, n)
         model, opt_state, loss = step(model, opt_state, y0s[idx], targets[idx])
-        if i % 300 == 0 or i == N_STEPS - 1:
+        if i % 300 == 0 or i == n_steps - 1:
             print(f"  [{tag:>10}] step {i:4d}  loss {float(loss):.3e}")
     print(f"  [{tag:>10}] trained in {time.time() - t0:.1f}s")
     return model
