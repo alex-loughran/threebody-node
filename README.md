@@ -149,6 +149,17 @@ symplectic-by-construction maps).
         floor (rp≈0.5) makes it **blind to the *best* candidates** (pick-best
         P@10=0). Honest verdict: prune, don't pick — and the lever is model
         accuracy. See `experiment_surrogate.py`, `results/surrogate.png`.
+  - [x] *D — push the accuracy floor down* (the lever behind B's "prune vs pick"
+        ceiling). Two moves: (1) **fix the kinetic term** to the exact `T=½|p|²`
+        instead of learning it (`FixedKineticPairwiseNODE`) — half the Hamiltonian
+        becomes exact; (2) train to convergence. Result on a held-out neighborhood
+        of the figure-eight: floor RMSE **0.22 → 0.005 (~40×)**, and 4B triage
+        jumps from **pick@10 0.00 → 0.90 (AUC 1.00)** — the surrogate becomes a
+        *precise selector*, not just a pruner. Learned-kinetic at matched budget:
+        floor 0.20, pick@10 0.30 (the inductive bias is decisive). *Caveats:*
+        scoped to one orbit family (cross-family untested); larger datasets need
+        iters ∝ data (90-traj run still undertrained at 6000 iters). See
+        `experiment_accuracy.py`, `results/accuracy.png`, `results/threebody_model_v2.eqx`.
   - [ ] *C — discover the invariants* rather than assume the Hamiltonian split.
 
 ## Result (milestones 1–2)
@@ -220,6 +231,7 @@ experiment_symplectic.py  M3: separable model + leapfrog vs RK4 (secular drift, 
 experiment_threebody.py   M3: symplectic Hamiltonian NODE on real 3-body engine data
 experiment_adaptive.py    M4A: time-transformed (logH) leapfrog vs fixed-step, close approaches
 experiment_surrogate.py   M4B: batched surrogate vs DOP853 — speedup + return-proximity triage
+experiment_accuracy.py    M4D: fixed-kinetic inductive bias + data scaling → lower floor, prune→pick
 experiment_protein.py            offshoot: 3-way A/B (energy drift + rotation generalization)
 experiment_protein_scale.py      offshoot: size generalization + mixed-N fix
 experiment_protein_symplectic.py offshoot: leapfrog vs RK4 on the learned peptide H

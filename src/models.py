@@ -168,3 +168,50 @@ class PairwiseHamiltonianNODE(eqx.Module):
     def vector_field(self, y):
         q, p = _split(y)
         return jnp.concatenate([self.dT_dp(p), -self.dV_dq(q)])
+
+
+class FixedKineticPairwiseNODE(eqx.Module):
+    """Same pairwise potential as `PairwiseHamiltonianNODE`, but the kinetic energy
+    is FIXED to the exact T(p) = 1/2 |p|^2 (unit masses) instead of learned.
+
+    We *know* the kinetic term exactly, so learning T_theta(p) only wastes
+    capacity and injects error. Hard-coding it makes half the Hamiltonian exact,
+    focuses all parameters on the hard part (the potential), and halves the
+    parameter count -- a stronger, physically-correct inductive bias aimed
+    squarely at lowering the model-error floor. Still separable -> leapfrog / logH
+    apply unchanged.
+    """
+
+    g_mlp: eqx.nn.MLP
+    n_bodies: int = eqx.field(static=True)
+
+    def __init__(self, key, n_bodies: int = 3, width: int = 64, depth: int = 2):
+        self.g_mlp = eqx.nn.MLP(2, "scalar", width, depth,
+                                activation=jax.nn.softplus, key=key)
+        self.n_bodies = n_bodies
+
+    def kinetic(self, p):
+        return 0.5 * jnp.dot(p, p)               # EXACT, not learned
+
+    def potential(self, q):
+        r = q.reshape(self.n_bodies, 2)
+        total = 0.0
+        for i in range(self.n_bodies):
+            for j in range(i + 1, self.n_bodies):
+                d = jnp.linalg.norm(r[i] - r[j])
+                total = total + self.g_mlp(jnp.array([d, 1.0 / d]))
+        return total
+
+    def hamiltonian(self, y):
+        q, p = _split(y)
+        return self.kinetic(p) + self.potential(q)
+
+    def dT_dp(self, p):
+        return p                                  # exact gradient of 1/2 |p|^2
+
+    def dV_dq(self, q):
+        return jax.grad(self.potential)(q)
+
+    def vector_field(self, y):
+        q, p = _split(y)
+        return jnp.concatenate([self.dT_dp(p), -self.dV_dq(q)])

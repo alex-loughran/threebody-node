@@ -132,7 +132,10 @@ def generate(seed=0, n_perturb=8, sigma=0.02, periods=2.0, pts_per_period=100,
     trajectory shares dt but has its OWN number of points is fixed (periods and
     pts_per_period are per-orbit so windows share a relative time grid within a
     source; we resample all to a common dt and length)."""
-    cache_path = Path(__file__).parent.parent / "datasets" / f"threebody_s{seed}.npz"
+    # cache key includes ALL generation params -- changing any of them must
+    # invalidate the cache (a seed-only key silently served stale data before).
+    tag = f"s{seed}_n{n_perturb}_sig{sigma}_p{periods}_ppp{pts_per_period}_src{n_sources}"
+    cache_path = Path(__file__).parent.parent / "datasets" / f"threebody_{tag}.npz"
     if cache and cache_path.exists():
         d = np.load(cache_path)
         return jnp.asarray(d["trajs"]), float(d["dt"])
